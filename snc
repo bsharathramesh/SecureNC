@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+import socket
+import sys
+import json
+from base64 import b64decode
+from base64 import b64encode
+from Crypto.Util.Padding import unpad
+from Crypto.Protocol.KDF import PBKDF2
+from Crypto.Random import get_random_bytes
+from Crypto.Hash import SHA512
+from Crypto.Cipher import AES
+import argparse
+import struct
+
+
+
+# Server Class
+class Server_Class:
+   
+    # The function receives connection object as a parameter.
+    def recieve_message(self,client):
+        # Reading the message and unpacking it into an integer
+        int_message_length = self.recieve_nbyte(client, 4)
+        if not int_message_length:
+            return None
+        # Unpack the string according to the given format.
+        message_length = struct.unpack('>I', int_message_length)[0]
+        return self.recieve_nbyte(client, message_length)
+    
+    # The function receives the object of connection and message as an input parameter.
+    def send_message(self,client, msg):
+        # Return a string containing the values packed according to the given format.
+        # The arguments must match the values required by the format exactly.
+        # In this scenario the format is standard unsigned int size 4
+        # 4 byte length prefixed with the message.
+        msg = struct.pack('>I', len(msg)) + msg
+        client.sendall(msg)
+
+    # Receive n bytes until the end of the file is reached.
+    # The function receives the object of connection and number of bytes to be read as an input parameter.
+    def recieve_nbyte(self,client, l):
+        bdata = b''
+        while len(bdata) < l:
+            packet = client.recv(l - len(bdata))
+            if not packet:
+                return None
+            bdata += packet
+        return bdata
+
+    # The function receives arginput.key and arginput.l as the parameters
+    def Server(self,key,port):
+        
+        filedata = ''
+        if not sys.stdin.isatty():
+            filedata = sys.stdin.read()
+        
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            # Binding the server to local ip and port
+            server.bind(('0.0.0.0', port))
+            server.listen(5)
+            client, address = server.accept()
+            data_recvd = ''
+            data_final = b''
+            json_loads = ''
+            salt = b''
+            try:
+                data_final = b''
+                data_final = self.recieve_message(client)
+                json_loads1 = data_final[16:]
+                json_loads = json_loads1.decode('utf-8')
+                salt = data_final[:16]
+                b64 = json.loads(json_loads)
+                json_key = ['nonce', 'header', 'ciphertext', 'tag']
+                jv = {k: b64decode(b64[k]) for k in json_key}
+                password = key.encode(encoding='utf-8')
+                keys = PBKDF2(password, salt, 32, count=1000000,hmac_hash_module=SHA512)
+                cipher = AES.new(keys, AES.MODE_GCM, nonce=jv['nonce'])
+                cipher.update(jv['header'])
+                plain_text = cipher.decrypt_and_verify(jv['ciphertext'], jv['tag'])
+                sys.stdout.write(plain_text.decode('utf-8'))
+            
+            except ValueError:
+                print("Error in decryption")
+            except KeyError:
+                print("Error in decryption")
+            
+            data = filedata.encode(encoding='utf-8')
+            header = b"header"
+            password = key.encode(encoding='utf-8')
+            keys = PBKDF2(password, salt, 32, count=1000000,hmac_hash_module=SHA512)
+            cipher = AES.new(keys, AES.MODE_GCM)
+            cipher.update(header)
+            ciphertext, tag = cipher.encrypt_and_digest(data)
+            json_key = ['nonce', 'header', 'ciphertext', 'tag']
+            json_value = [b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag)]
+            result_ack = json.dumps(dict(zip(json_key, json_value)))
+            self.send_message(client, result_ack.encode('utf-8'))
+        server.close()
+
+
+# Client Class
+class Client_Class:
+    
+    def recieve_message(self,client):
+        int_message_length = self.recieve_nbyte(client, 4)
+        if not int_message_length:
+            return None
+        # Unpack the string according to the given format.
+        message_length = struct.unpack('>I', int_message_length)[0]
+        return self.recieve_nbyte(client, message_length)
+
+    def send_message(self,client, msg):
+        # Return a string containing the values packed according to the given format.
+        # The arguments must match the values required by the format exactly.
+        # In this scenario the format is standard unsigned int size 4
+        msg = struct.pack('>I', len(msg)) + msg
+        client.sendall(msg)
+
+    def recieve_nbyte(self,client, l):
+        bdata = b''
+        while len(bdata) < l:
+            packet = client.recv(l - len(bdata))
+            if not packet:
+                return None
+            bdata += packet
+        return bdata
+
+    def Client(self, key, ip_address, port):
+        filedata = ''
+        if not sys.stdin.isatty():
+            filedata = sys.stdin.read()
+        
+        header = b"header"
+        data = filedata.encode(encoding='utf-8')
+        password = key.encode(encoding='utf-8')
+        salt = get_random_bytes(16)
+        keys = PBKDF2(password, salt, 32, count=1000000, hmac_hash_module=SHA512)
+        # Creating a new AES object by new(), the first parameter must be a key.
+        cipher = AES.new(keys, AES.MODE_GCM)
+        cipher.update(header)
+        ciphertext, tag = cipher.encrypt_and_digest(data)
+        json_key = ['nonce', 'header', 'ciphertext', 'tag']
+        json_value = [b64encode(x).decode('utf-8') for x in (cipher.nonce, header, ciphertext, tag)]
+        output_dump = json.dumps(dict(zip(json_key, json_value)))
+        
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+            client.connect((ip_address,port))
+            data = salt + output_dump.encode(encoding='utf-8')
+            self.send_message(client, data)
+            json_loads = ''
+            try:
+                server_recvd = b''
+                server_recvd = self.recieve_message(client)
+                json_loads = server_recvd.decode('utf-8')
+                b64 = json.loads(json_loads)
+                json_key = ['nonce', 'header', 'ciphertext', 'tag']
+                jv = {k: b64decode(b64[k]) for k in json_key}
+                password = key.encode(encoding='utf-8')
+                keys = PBKDF2(password, salt, 32, count=1000000,hmac_hash_module=SHA512)
+                # creating a new AES object by new(), the first parameter must be a key.
+                cipher = AES.new(keys, AES.MODE_GCM, nonce=jv['nonce'])
+                cipher.update(jv['header'])
+                plain_text = cipher.decrypt_and_verify(jv['ciphertext'], jv['tag'])
+                sys.stdout.write(plain_text.decode('utf-8'))
+            except ValueError:
+                print("Error in decryption")
+            except KeyError:
+                print("Error in decryption")
+        client.close()
+	
+
+# Main Program
+if __name__ == "__main__":
+
+    # Parser library used to provide help functionality
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--key", help="KEY used for transmission and receiving of the files")
+    parser.add_argument("-l", help="listening port of the server", type=int)
+    parser.add_argument("ip_address", help="IP address of the server", nargs='?')
+    parser.add_argument("port", help="Port number of the server", type=int, nargs='?')
+    argument_input = parser.parse_args()
+    
+    if argument_input.l:
+        Server_Object = Server_Class()
+        Server_Object.Server(argument_input.key,argument_input.l)
+    else:
+        Client_Object = Client_Class()
+        Client_Object.Client(argument_input.key,argument_input.ip_address,argument_input.port)
+ 
